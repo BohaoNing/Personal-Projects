@@ -1,0 +1,1280 @@
+# %% [code]
+---
+title: "Early-Career Kagglers and Skills Development: Choosing between Master’s Education and Work Experience"
+author: "Ekaterina Melianova & Artem Volgin"
+output:
+  html_document:
+    toc: true
+    toc_depth: 1
+    theme: cosmo
+    number_sections: yes
+    code_folding: hide
+---
+
+<center>
+
+![Source: https://www.personneltoday.com/hr/much-guidance-employment-tribunal-expected-give-litigant-person/](https://i.ibb.co/hgKj9HD/picture.png)
+
+</center>
+
+
+```{r Data preproccesing, message=FALSE, warning=FALSE, include=FALSE}
+### libraries
+# Basic
+library(rio)
+library(foreign)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(stringi)  
+library(utf8)
+library(dplyr)
+
+# Multilevel
+library(lme4)
+library(caret)
+library(performance)
+library(lmerTest)
+library(MuMIn)
+library(lavaan)
+library(multcomp)
+# library(mixedup)
+library(sjPlot)
+library(emmeans)
+
+# plotting
+library(WDI)
+library(countrycode)
+library(viridis)
+library(hrbrthemes)  
+library(ggpmisc)
+library(kableExtra)
+library(rstatix)
+library(grid)
+library(gridExtra)
+library(RColorBrewer)
+
+
+plot.RandomCoeffs <- function(model_object, coeff,
+                              top_n_coeffs = 10000,
+                              onlySignficant = F,
+                              ggtitle = ''){
+  
+  df_coeffs <- as.data.frame(ranef(model_object, condVar=T))
+  
+  # Select only group coefficients
+  df_coeffs <- df_coeffs %>% filter(grpvar=="country")
+  
+  # Select coefficient to plot
+  df_coeffs <- df_coeffs %>% filter(term==coeff)
+  
+  # Indicate significant coefs
+  df_coeffs <- df_coeffs %>%
+    dplyr::mutate(condupper=condval + 1.64*condsd,
+                  condlower=condval - 1.64*condsd,
+                  significant=sign(condlower)==sign(condupper)) # %>%
+  
+  # Select only significant coefficients
+  if(onlySignficant){
+    df_coeffs <- df_coeffs %>% filter(significant)
+  }
+  
+  # Select top N coefficients
+  df_coeffs <- df_coeffs %>% top_n(top_n_coeffs, wt = condval)
+  
+  # PLOTTING
+  points_color <- ifelse(df_coeffs$significant, "coral3", "darkgrey")
+  errorbar_color <- ifelse(df_coeffs$significant, "black", "grey")
+  
+  ggplot(data = df_coeffs,
+         aes(x = condval, y = reorder(grp, condval))) +
+    
+    geom_errorbarh(aes(xmin = condlower,
+                       xmax = condupper,
+                       height = 0.4),
+                   color = errorbar_color) +
+    geom_point(size = 3, color = points_color) + 
+    theme_bw() +
+    theme(axis.text.y = element_text(color = "black", size = 8),
+          axis.text.x = element_text(size = 12, face = "bold"))  +
+    geom_vline(xintercept = 0, linetype = "dotted", color = "grey", size = 1.5) + 
+    labs(y = "", x = '') + 
+    ggtitle(ggtitle) +
+    theme(plot.title = element_text(size=18, face="bold", hjust=0.5),
+          legend.position="bottom") 
+  
+}
+
+
+# a file matching questions across years
+qm <- readxl::read_xlsx('../input/questions-matching-kaggle-survey/questions_matching.xlsx')
+
+# reading 2019-2021 data 
+survey_2019 <- read.csv('../input/kaggle-survey-2019/multiple_choice_responses.csv', encoding = "UTF-8")
+survey_2019_text <- read.csv('../input/kaggle-survey-2019/other_text_responses.csv', encoding = "UTF-8")
+survey_2020 <- read.csv('../input/kaggle-survey-2020/kaggle_survey_2020_responses.csv', encoding = "UTF-8")
+survey_2021 <- read.csv('../input/kaggle-survey-2021/kaggle_survey_2021_responses.csv', encoding = "UTF-8")
+
+
+# names of variables selected for the analysis
+var_names <- as.vector(unique(qm[qm$Skills == 1|qm$Variable %in% c('age',
+                                                                   'gender',
+                                                                   'country',
+                                                                   'education',
+                                                                   'title',
+                                                                   'year_coding',
+                                                                   'years_ml',
+                                                                   'salary'), 'Variable'])$Variable)
+# picking columns with variable names defined above
+# 2019
+df_2019 <- survey_2019 %>%
+  dplyr::select((qm[qm$Variable %in% var_names, 'Q_2019']
+            %>% filter(!Q_2019 == 'NA'))$Q_2019) %>% slice(2:n()) %>%
+  select_if(~ !any(grepl('None', ., ignore.case = T)))
+
+# 2020
+df_2020 <- survey_2020 %>%
+  dplyr::select((qm[qm$Variable %in% var_names, 'Q_2020']
+          %>% filter(!Q_2020 == 'NA'))$Q_2020) %>% slice(2:n())%>%
+  select_if(~ !any(grepl('None', ., ignore.case = T)))
+# 2021
+df_2021 <- survey_2021 %>%
+  dplyr::select((qm[qm$Variable %in% var_names, 'Q_2021']
+          %>% filter(!Q_2021 == 'NA'))$Q_2021) %>% slice(2:n())%>%
+  select_if(~ !any(grepl('None', ., ignore.case = T)))
+
+# renaming columns
+rename_cols <- function(df, df_qm = 'qm', year, new_names = qm[, 'Variable']$Variable){
+  for (i in 1:ncol(df)){
+    for (j in 1:nrow(eval(parse(text = df_qm)))){
+      if(names(df)[i] == eval(parse(text = paste0(df_qm, "[, 'Q_", year, "']$Q_", year)))[j]){
+        names(df)[i] = new_names[j]
+    }
+   }
+  } 
+  return(df)
+}
+
+# applying the function
+df_2019 <-  rename_cols(df = df_2019, year = 2019)
+df_2020 <-  rename_cols(df = df_2020, year = 2020)
+df_2021 <-  rename_cols(df = df_2021, year = 2021)
+
+# appending sequence numbers to duplicates in names
+names(df_2019) <- make.unique(names(df_2019), sep = '_')
+names(df_2020) <- make.unique(names(df_2020), sep = '_')
+names(df_2021) <- make.unique(names(df_2021), sep = '_')
+
+#--------------- creating skills variable: summing the number of non-missing instances
+# defining unique names for skills
+non_skill_vars <- c('age', 'gender', 'country', 'education', 'title', 'year_coding', 'years_ml', 'salary')
+skills <- names(df_2019)[-which(names(df_2019) %in% non_skill_vars)]
+skills_unique <- unique(gsub('_[1-9].*', '', skills))
+
+# appending skills counts (rowSums) to socio-demographics and general questions
+# 2019
+temp_2019 <- df_2019[names(df_2019) %in% non_skill_vars]
+for (i in 1:length(skills_unique)){
+  temp_2019_ <- df_2019 %>% 
+    summarise_at(vars(contains(skills_unique[i])), funs(.!='')) %>%
+    summarise(!!skills_unique[i] := rowSums(.))
+  temp_2019 <- cbind.data.frame(temp_2019, temp_2019_)
+}
+# 2020
+temp_2020 <- df_2020[names(df_2020) %in% non_skill_vars]
+for (i in 1:length(skills_unique)){
+  temp_2020_ <- df_2020 %>% 
+    summarise_at(vars(contains(skills_unique[i])), funs(.!='')) %>%
+    summarise(!!skills_unique[i] := rowSums(.))
+  temp_2020 <- cbind.data.frame(temp_2020, temp_2020_)
+}
+# 2021
+temp_2021 <- df_2021[names(df_2021) %in% non_skill_vars]
+for (i in 1:length(skills_unique)){
+  temp_2021_ <- df_2021 %>% 
+    summarise_at(vars(contains(skills_unique[i])), funs(.!='')) %>%
+    summarise(!!skills_unique[i] := rowSums(.))
+  temp_2021 <- cbind.data.frame(temp_2021, temp_2021_)
+}
+
+# combining 3 years
+df <- do.call(rbind, lapply(c('temp_2019',
+                              'temp_2020',
+                              'temp_2021'),
+                            function(x){data.frame(year = as.numeric(substr(x, 6, nchar(x))),
+                                                   eval(parse(text = x)))}))
+
+#-------------------------------------------------------------------------------
+# cleaning socio-demographics and general variables
+#-------------------------------------------------------------------------------
+
+# country
+tab_cntry <- as.data.frame(table(df$country, df$year)>10)
+df <- df %>% filter(country %in% rownames(tab_cntry %>% filter_all(all_vars(.== TRUE))))
+
+# fixing country names 
+df[df$country == 'United Kingdom of Great Britain and Northern Ireland',
+   'country'] <- 'UK'
+df[df$country == 'Iran, Islamic Republic of...',
+   'country'] <- 'Iran'
+df[df$country == 'United States of America',
+   'country'] <- 'USA'
+
+# year
+df$year <- as.factor(df$year)
+
+# gender
+df$gndr <- ifelse(df$gender %in% c('Female', 'Woman'), 'woman',
+                  ifelse(df$gender %in% c('Male', 'Man'), 'man', 'other_gender'))
+
+# salary
+df$slry <- ifelse(df$title %in% c('Student', 'Not employed', 'Currently not employed'), 0, df$salary)
+df$slry <- gsub(",|\\$|>", "", df$slry)
+df <- cbind.data.frame(df, str_split_fixed(df$slry, '-', 2))
+df$slry_numb <- as.numeric(df$`1`) + (as.numeric(df$`2`) - as.numeric(df$`1`))/2
+df$slry_numb <- ifelse(df$title %in% c('Student', 'Not employed', 'Currently not employed'), 0, df$slry_numb)
+df$slry_numb <- as.numeric(ifelse(df$`1` > 0 & df$`2` == '', df$`1`, df$slry_numb))
+df <- df %>% select(-c(slry, `1`, `2`))
+
+# age
+df <- cbind.data.frame(df, str_split_fixed(df$age, '-', 2))
+df$age_numb <- ifelse(df$age == '70+', 0, (as.numeric(df$`1`) + ((as.numeric(df$`2`) - as.numeric(df$`1`))/2)))
+df <- df %>% select(-c(`1`, `2`))
+
+# status
+df$status <- ifelse(df$years_ml %in% c('2-3 years', '1-2 years', '< 1 years', 'Under 1 year') &
+                    !df$title %in% c('Student', 'Not employed', 'Currently not employed') &
+                    df$education == 'Bachelor’s degree',
+                    'early_non_student',
+                    
+                    ifelse(df$years_ml %in% c('2-3 years', '1-2 years', '< 1 years', 'Under 1 year') & 
+                           df$title == 'Student' &
+                           df$education == 'Master’s degree',
+                           'master_non_working', NA)
+                    
+                    )
+
+# filtering by status
+df <- df[is.na(df$status) == F,]
+
+# final dataset
+selected <- c('prog_lang',
+              'ide',
+              'ml_frameworks',
+              'ml_algorithms',
+              'hosted_nb',
+              'hardware',
+              'comp_vision',
+              'nlp')
+
+df <- as.data.frame(df)
+df <- df %>%
+  select(c(year, country, age, age_numb, gndr, years_ml, status, slry_numb,
+           all_of(selected))) %>% drop_na()
+
+# Binary
+df <- df %>% 
+  mutate(ID = row_number())
+for (i in 1:length(selected)){
+  df_ <- df %>% 
+    summarise(!!paste0(selected[i], '_bin') := if_else(eval(parse(text = selected[i])) >=
+                                                         mean(eval(parse(text = selected[i]))), 1, 0),
+              ID = ID)
+  df <- df %>%
+    left_join(df_, by = 'ID')
+}
+
+# filtering n() by country > 100 to ensure representativeness
+tab_cntry <- as.data.frame(table(df$country) > 100)
+df <- df %>% 
+  filter(country %in% rownames(tab_cntry %>% filter_all(all_vars(.== TRUE)))) %>%
+  filter(country != 'Other')
+
+# Centering age
+df$age_cent <- scale(df$age_numb, scale = F)
+
+# Binary age
+df$age_bin <- ifelse(df$age_numb >= 27, 'old', 'young')
+
+# Recode intervals
+df$age_intervals <- dplyr::recode(df$age,
+              "45-49"="45+",
+              "50-54"="45+",
+              "55-59"="45+",
+              "60-69"="45+",
+              "70+"="45+")
+
+# Selected colors
+vec_colors <- c( "aquamarine3", "lightcoral", "deepskyblue3")
+
+# Sorting vectors
+vec_arrange <- c('prog_lang_bin', 'ide_bin',
+                 'ml_frameworks_bin', 'ml_algorithms_bin',
+                 'hosted_nb_bin',
+                 'hardware_bin',
+                 'comp_vision_bin',
+                 'nlp_bin')
+names_arrange <- c('Programming languages', 'IDE',
+                   'ML frameworks', 'ML algorithms',
+                   'Hosted notebooks',
+                   'Specialized hardware',
+                   'Computer vision',
+                   'Natural language processing')
+
+```
+
+<p style='text-align: justify;'> 
+_“What is better – taking up a postgraduate education or joining the workforce?”_ – a question raised by many students who have earned a bachelor’s degree. There is a range of pulling and pushing factors, such as receiving extra compensation or acquiring new skills, determining which aspiration to pursue at this crossroad.
+</p>
+
+<p style='text-align: justify;'> 
+This notebook aims to profoundly examine how one such factor – the acquisition of skills – varies between **non-working beginners with masters** and **working beginners with bachelors** in the field of data science and machine learning (on Kaggle). In other words, we compare the two groups of people in how advanced their competencies are after they have spent a couple of years doing their masters or in the labour market. The analysis discovers the overall skillset-related differences between the two groups as well as the variation of these differences over time, between countries, genders, and age categories.
+</p>
+
+<p style='text-align: justify;'> 
+The findings presented in this submission capitalise on rigorous modelling techniques and advanced estimation procedures, carefully tailored to the data specificities and the substantive goal of this study. Our analysis brings about a novel approach to the measurement of participants' expertise and is motivated by the practical relevancy of inferences. We hope such an investigation can be instructive and inspirational for DS&ML starters from diverse backgrounds who are struggling with making a better decision upon the completion of a bachelor’s level.
+</p>
+
+# Narrowing Down the Focus: Sample Selection and Generation of Variables
+
+<p style='text-align: justify;'> 
+We leveraged a dataset generated by pulling the Kaggle Survey data from 2019, 2020, and 2021 years to be able to track temporal changes in the main effects of focus. Earlier survey datasets were not used due to dissimilarities in the design of questions measuring respondents’ skillset possession. 
+</p>
+<p style='text-align: justify;'> 
+The following table portrays how we created our central predictor – **status of beginners in DS&ML**. All estimations showed in this notebook are based on a sample encompassing two categories of this predictor (we filtered the rest of the data).
+</p>
+
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+
+# Table with status definition
+tbl <- data.frame(`.` = c('Education level', 'Experience in machine learning', 'Employment'),
+          `Status: Non-Working Beginners with Masters` = c('Master', 'Up to 3 years', 'Student'),
+          `Status: Working Beginners with Bachelors` = c('Bachelor', 'Up to 3 years', 'Employed'))
+
+tbl %>%
+  kbl(booktabs = T, col.names = gsub("[.]", " ", names(tbl))) %>%
+  kable_classic(full_width = T) %>%
+  kable_styling(position = "center")%>%
+  column_spec(1, bold = T) %>%
+  row_spec(0, bold = T)
+
+
+```
+
+
+<span style="color:black">
+<p style='text-align: justify;'> 
+A list below details the remaining variables we cover in the analysis and their measurement:
+</p>
+</span>
+
+<p style='text-align: justify;'> 
+1. **Skillsets**: 8 binary dependent variables corresponding to a certain skillset category (e.g., programming languages). It reflects if a person has the above (1) or below average (0) total amount of skills reported (e.g., R, Python, SQL, C, etc.) within a category.
+</p>
+
+<p style='text-align: justify;'> 
+2. **Year**: a categorical variable describing the year of data collection (2019, 2020, or 2021).
+</p>
+
+<p style='text-align: justify;'> 
+3. **Country**: a categorical variable aggregating the data by country. To ensure the validity of findings, we restricted our estimation procedures by countries where both categories of the beginners’ status variable were sufficiently large (>100 cases in total).
+</p>
+
+<p style='text-align: justify;'> 
+4. **Gender**: a categorical measure for gender (1 – men, 2 – women, 3 – other). Substantively, we compare only men and women because of a small sample size for the group “other”.
+</p>
+
+<p style='text-align: justify;'> 
+5. **Age**: a binary variable indicating respondents older than a threshold of 25 years (1) or younger than this threshold (0). For descriptive purposes, we used more intervals.
+</p>
+
+<p style='text-align: justify;'> 
+6. **Income**: a continuous characteristic obtained by extracting middle points from the respective income intervals in a question about respondents’ yearly compensation.
+</p>
+
+
+# Statistical Method: Multilevel Binomial Logistic Model
+
+<p style='text-align: justify;'> 
+To compare skillsets of beginners with masters and beginners with work experience, **multilevel binomial logistic models** _(with skillsets as binary dependent variables, beginners’ status as a main predictor and countries as a grouping attribute)_ were exploited. This regression-based method enables us to control for the impact of other characteristics and hence produce more reliable parameter estimates. We made use of **random slope models** by explicitly assuming that variation in competencies for unemployed masters vs. working beginners is country-specific. Additionally, **interaction effects**, showing how the impact of status on skillset possession varies by gender, age, and years, were evaluated. Significance testing of the effects relies on 90% confidence intervals.
+</p>
+<p style='text-align: justify;'> 
+Why was this method employed? We surmised that variation in the dependent variables under focus – skillsets possession – is partly explained by differences in people’s countries of residence. Indeed, the [intraclass correlation coefficient (ICC)](https://en.wikipedia.org/wiki/Intraclass_correlation) for empty models (without predictors) ranged between 3% and 5% across our models, which is sufficient for building a country-based multilevel structure. Moreover, it was assumed (and further supported through model comparison) that the fact of people being nested within countries is in part responsible for the variation in our key association of interest - between the status of beginners and skillsets. Multilevel modelling allows us to consider such a dependence of respondents within countries leading to the elevated precision of estimates.
+</p>
+
+<p style='text-align: justify;'> 
+To begin with, let’s inspect an array of descriptive plots to get a general understanding of the data.
+</p>
+
+# Exploring the Data Patterns
+
+## What is the distribution of beginners’ groups by years and gender?
+<p style='text-align: justify;'> 
+The histogram below depicts the distribution of our two key groups – unemployed masters and working beginners with completed bachelors – by time and gender. 
+</p>
+<p style='text-align: justify;'> 
+It can be noticed that employed respondents with bachelors are more prevalent in the sample than non-working masters regardless of an observational year (around 70% vs. 30%). However, for women, this proportion looks largely balanced (all proportions are close to 50%). This means that for women embarking on a journey of postgraduate studies and entering the workforce are equally valuable choices, whereas men seem to prefer employment after finishing their bachelors. Notably, in 2020, a pandemic year, there was a slight surge in popularity of the educational trajectory amongst ML&DS beginners, especially for females.
+</p>
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+# Preprocessing for the gender-time EDA plot
+df_gender <- df %>% filter(gndr %in% c('man', 'woman')) %>%
+  group_by(year, gndr) %>%
+  count(
+        year = factor(year), 
+        status = factor(status)
+        ) %>%
+  mutate(pct = prop.table(n),
+         gndr = dplyr::recode(gndr, 'man'="Men", 'woman'='Women'))
+
+t <- data.frame(unclass(table(df$year, df$status)))
+t <- t/rowSums(t)
+t$gndr <- 'Total'
+t$year <- rownames(t)
+t <- t %>%
+ pivot_longer(cols = c('early_non_student', 'master_non_working'),
+              names_to = 'status'
+              )
+t <- t %>% rename(pct=value)
+
+df_gender <- df_gender %>% dplyr::select(status, pct, year, gndr)
+df_gender <- rbind(df_gender, t)
+df_gender$gndr <- factor(df_gender$gndr, levels=c("Total", "Men", "Women"))
+
+```
+
+```{r fig.height=4, fig.width=5, fig.align='center', message=FALSE, warning=FALSE, echo=FALSE}
+
+# The Gender-time EDA plot
+df_gender %>%
+  ggplot(aes(fill = status, y = pct,  x = year,
+             label = scales::percent(pct, accuracy = 1))) + 
+  geom_bar(stat = "identity", colour="white", size=1) +
+  scale_fill_manual(values=c(vec_colors[2], vec_colors[1]),
+                    labels = c("Beginners with work experience", "Beginners with masters"),
+                    name = "") + 
+  xlab("") + ylab('') +
+  theme(
+        legend.position = "bottom",
+        panel.background = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y  = element_blank(),
+        plot.title = element_text(size=10, face="bold", hjust=0.5)) + 
+  geom_text(position = position_stack(vjust = 0.5),
+            size = 3) +
+  facet_grid(cols = vars(gndr)) +
+  ggtitle('Groups of Beginners by Gender and Time') 
+
+```
+
+## What is the distribution of beginners’ groups by age?
+
+<p style='text-align: justify;'> 
+Next, we present the distribution of age by beginners’ groups. It is vivid that a younger age group (18-24 years) compared to an older age group (25+ years) tends to choose further studies more frequently, which is quite expected. Interestingly, there are still people in the sample who decide to take on a postgraduate pathway at much older ages (e.g., after 40 years).
+</p>
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+# Preprocessing for the Age EDA plot
+df_age <- data.frame(prop.table(table(df$age_intervals, df$status), margin = 2))
+colnames(df_age) <- c('age_interval', 'status', 'pct')
+df_age$age_interval <- factor(df_age$age_interval,
+                                 levels = c("45+", "40-44", "35-39", "30-34", "25-29", "22-24", "18-21"))
+df_age.1 <- df_age %>% filter(status=='early_non_student')
+df_age.2 <- df_age %>% filter(status=='master_non_working')
+
+```
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+
+# The Age EDA plot
+g.1 <- ggplot(data = df_age.1, aes(x = pct, y = age_interval)) +
+  geom_bar(stat = "identity", fill = vec_colors[2]) + 
+  scale_x_reverse(labels = scales::percent_format(accuracy = 1),
+                  limits = c(0.5, 0)) +
+  ggtitle("Beginners with work experience") +
+  theme_minimal() + 
+  theme(axis.title.x = element_blank(), 
+        axis.title.y = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(), 
+        plot.margin = unit(c(1,-1,1,0), "mm"),
+        plot.title = element_text(hjust = 0.9))
+
+g.2 <- ggplot(data = df_age.2, aes(x = pct, y = age_interval)) +
+  geom_bar(stat = "identity", fill = vec_colors[1]) +
+  xlim(0, 0.5) + 
+  ggtitle("  Beginners with masters") +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  theme_minimal() + 
+  theme(axis.title.x = element_blank(), 
+        axis.title.y = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks.y = element_blank(), 
+        plot.margin = unit(c(1,-1,1,0), "mm"),
+        plot.title = element_text()) 
+
+g.mid <- ggplot(df_age.1,aes(x=1,y=age_interval))+geom_text(aes(label=age_interval))+
+  geom_segment(aes(x=0.94,xend=0.96,yend=age_interval))+
+  geom_segment(aes(x=1.04,xend=1.065,yend=age_interval))+
+  ggtitle("")+
+  ylab(NULL)+
+  scale_x_continuous(expand=c(0,0),limits=c(0.94,1.065))+
+  theme(axis.title=element_blank(),
+        panel.grid=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        panel.background=element_blank(),
+        axis.text.x=element_text(color=NA),
+        axis.ticks.x=element_line(color=NA),
+        plot.margin = unit(c(1,-1,1,-1), "mm"))
+
+
+gg.1 <- ggplot_gtable(ggplot_build(g.1))
+gg.2 <- ggplot_gtable(ggplot_build(g.2))
+gg.mid <- ggplot_gtable(ggplot_build(g.mid))
+
+
+```
+
+```{r message=FALSE, warning=FALSE, echo=FALSE, fig.height=4, fig.width=8, fig.align='center'}
+
+# The Age EDA plot - combined
+grid.arrange(gg.1, gg.mid, gg.2, ncol=3, widths=c(4/9,1/9,4/9),
+             top=textGrob("Groups of Beginners by Age",
+                          gp=gpar(fontsize=13,
+                                  fontfamily='Arial',
+                                  fontface='bold')))
+
+```
+
+
+## What is the distribution of beginners’ groups by country?
+
+<p style='text-align: justify;'> 
+We may also wish to describe the early-career status variable by country. The scatterplot below displays the relationship between the percentage of non-working masters in a country and its logged GPD (a proxy of countries’ prosperity). The graph contains two extra pieces of information – the size and colour of bubbles. Larger bubbles mean a country is represented by a greater sample size, more greenish colour shades correspond to bigger country-specific salaries for labour market workers.
+</p>
+<p style='text-align: justify;'> 
+A regression line has a positive slope: the share of unemployed masters amongst beginners in a country and its wealthiness are positively related. In other words, more affluent countries are prone to attract students aspiring to proceed with postgraduate studies, while less affluent countries incline people to start their working careers earlier. Importantly, rich countries seem not only to attract education seekers but to pay more to those who enter the workforce.
+</p>
+
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+
+# getting GDP
+gdp <- WDI(indicator = 'NY.GDP.PCAP.KD',
+          country = 'all',
+          start = 2020, end = 2020)[, c(1,3)]
+names(gdp) <- c('iso2c', 'gdp')
+
+# country codes
+df$iso2c <- countrycode(df$country, 'country.name', "iso2c", nomatch = 'other')
+
+# merging gdp by country codes
+df <- df %>%
+  left_join(gdp, by = 'iso2c')
+
+# summarizing status by cntry
+df_cntry <- df %>%
+  group_by(country) %>%
+  summarise(pct_masters = round(sum(status == 'master_non_working')/n(),2),
+            gdp = mean(gdp),
+            survey_n = n(),
+            mean_salary=mean(slry_numb)
+            ) 
+
+
+
+```
+
+
+```{r echo=FALSE, fig.height=6, fig.width=8, fig.align='center', message=FALSE, warning=FALSE}
+
+# The Country EDA plot
+ggplot(df_cntry, aes(x=gdp, y=pct_masters, label=country)) + 
+  
+  geom_point(aes(size=survey_n, color = mean_salary/1000)) +
+  geom_point(aes(size=survey_n), pch=21) +
+  
+  geom_text(aes(size = NULL, label = country), hjust = 0.5, vjust = 1.5) +
+  geom_smooth(method = lm,se = F, color = "darkgrey", size=0.7, linetype='dashed') +
+  
+  scale_color_gradient(low=vec_colors[2], high=vec_colors[1], trans='log10') +
+  scale_size_continuous(trans='log10') + 
+  scale_x_continuous(trans='log10') +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  
+  labs(x = "GDP per capita in 2020", y = "Percentage of Beginners with masters",
+       size="Number of participants", col="Average salary in USD, 1000 ") + 
+  ggtitle("GDP per capita and Percentage of Beginners with Masters") + 
+  
+
+  theme_minimal() +
+  theme(plot.title = element_text(size=14, face="bold", hjust=0.5),
+        legend.position="bottom")
+
+```
+
+
+## What is the distribution of skillset categories?
+
+<p style='text-align: justify;'> 
+Finally, it can be instructive to glance at the distribution of our skillset variables. The heatmap below portrays the number of respondents possessing a certain amount of skills within a skillset category.
+</p>
+<p style='text-align: justify;'> 
+It is clear that our distributions have dissimilar shapes with different patterns of skewness. To unify this in modelling, we utilised skillsets as 8 dependent variables in a **dichotomised form** by assigning 1 to people who were above the distributional average and 0 to those who were below it.
+</p>
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+# turning the data to a long format for further plotting
+df_long <- df %>%
+  pivot_longer(cols = all_of(selected),
+               names_to = 'skill_name',
+               values_to = 'skill_n')
+
+df_long$skill_n_cut <- factor(ifelse(df_long$skill_n >= 10, 10, df_long$skill_n))
+skills_heatmap <- data.frame(unclass(table(df_long$skill_name, df_long$skill_n_cut)))
+colnames(skills_heatmap) <- 0:(ncol(skills_heatmap)-1)
+colnames(skills_heatmap)[ncol(skills_heatmap)] <- "10+"
+skills_heatmap <- skills_heatmap[order(-rowSums(skills_heatmap[,2:ncol(skills_heatmap)])),]
+
+
+```
+
+```{r message=FALSE, warning=FALSE, echo=FALSE, fig.height=5, fig.width=8,fig.align='center'}
+
+# The Skills by Categories plot
+
+setHook("grid.newpage", function() pushViewport(viewport(x=1,y=1,width=0.9, height=0.9, name="vp", just=c("right","top"))), action="prepend")
+
+pheatmap::pheatmap(skills_heatmap,
+                   cluster_rows=F,
+                   cluster_cols=F,
+                   angle_col = "0",
+                   color = colorRampPalette(c("white", vec_colors[3]))(100),
+                   border_color="white",
+                   display_numbers=T,
+                   number_format = "%.0f",
+                   legend=F,
+                   main="Distribution of Skills by Categories",
+                   fontsize=11,
+                   fontsize_number=8,
+                   fontsize_row=10,
+                   fontsize_col=10,
+                   labels_row = names_arrange)
+
+setHook("grid.newpage", NULL, "replace")
+grid.text("Total number of skills", y=-0.04, x=0.35, gp=gpar(fontsize=11))
+
+```
+        
+        
+
+        
+# Results: Who is More Skilful - Master Students or Beginners with Jobs - and in Which Circumstances?
+
+<p style='text-align: justify;'> 
+Further, we unpack our multilevel modelling results. Each subsection contains a formula emphasizing the parameters that we sought to estimate within a subsection. In all graphs, the plotted effects (whether in the form of error bars or heatmaps) are essentially coefficients (logits) from multilevel logistic regressions. 
+</p>
+
+## Which skillsets are more successfully learnt by master’s students compared to early-career workers?
+
+<p style='text-align: justify;'> 
+First, we present fixed effects of how beginners’ status influences skillsets possessed by Kaggle survey participants. A positive sign of coefficients indicates that having an above-average number of skills is greater for non-working master students, while a negative one informs that having an above-average number of skills is greater for employed early-career bachelors. **In a nutshell: a positive sign of coefficients – beginners with masters are more skilful, a negative sign – beginners with work experience are more skilful.**
+</p>
+<p style='text-align: justify;'>     
+The picture below demonstrates that on average masters outperform bachelors in most of the skillset categories such as ML frameworks, ML algorithms, NLP, IDE, programming languages. However, employed beginners without masters are better (in quantitative terms) at specialised hardware applications. Both early-career groups under focus are equally good at computer vision and hosted notebooks usage (CIs cross the zero line).
+</p>
+
+<p style='text-align: justify;'> 
+The following equations highlight with red the parameters discussed in the subsection and displayed in the subsequent graph: 
+</p>
+
+$$
+\scriptsize
+Logit(Skillset_{ij}) = b_{0j} + \color{Red}{b_{1j}*status} + b_{2j}*gender + b_{3j}*log(income) + b_{4j}*age + b_{5j}*year \\
+\scriptsize
+b_{0j} = \gamma_{00} + u_{00} \\
+\scriptsize
+b_{1j} = \gamma_{10} + u_{10} \\
+\scriptsize
+b_{ij} = \gamma_{i0}, \space for \space i \neq 0,1
+$$
+
+<p style='text-align: justify;'> 
+where an individual $i$ is nested within a country $j$; $b_{ij}$ represents regression coefficients; $\gamma_{i0}$ indicates country-specific intercepts for regression coefficients; $u_00$ and $u_10$ are the country-level random effects.
+</p>
+        
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+
+# --- Check ICC for the models
+
+# null_models <- list()
+# icc_values <- c()
+# for(i in seq_along(vec_arrange)) {
+#   my_formula = as.formula(paste(vec_arrange[i],
+#     "~ 1 + (1 | country)"
+#   ))
+#   null_models[[i]] = glmer(my_formula, data = df,
+#                      family = binomial(link = 'logit'),
+#                      control = glmerControl(optimizer = "bobyqa",
+#                                             optCtrl = list(maxfun = 2e5)))
+#   icc_values <- c(icc_values, round(icc(null_models[[i]])$ICC_adjusted*100, 2))
+# }
+# 
+# df_icc <- data.frame(name=vec_arrange,
+#                      icc=icc_values)
+
+
+random_slope_models <- list()
+for(i in seq_along(vec_arrange)) {
+  my_formula = as.formula(paste(vec_arrange[i],
+    "~ gndr + scale(log(slry_numb + 1)) + age_bin + status + year + (1 + status| country)"
+  ))
+  random_slope_models[[i]] = glmer(my_formula,
+                                   data = df,
+                     family = binomial(link = 'logit'),
+                     control = glmerControl(optimizer = "bobyqa",
+                                            optCtrl = list(maxfun = 4e5)
+                                            ))
+  print(i)
+}
+
+# extracting point estimates
+est_status <- unlist(lapply(1:length(random_slope_models), function(i) coef(summary(random_slope_models[[i]]))['statusmaster_non_working', 'Estimate']))
+
+# extracting CIs
+confint_status <- do.call(rbind.data.frame, lapply(1:length(random_slope_models), function(i) confint(random_slope_models[[i]], method = "Wald",
+          level  = 0.9)['statusmaster_non_working',]))
+names(confint_status) <- c('lower_bound', 'upper_bound')
+est_confint_status <- cbind.data.frame(est_status, confint_status)
+est_confint_status$model_names <- names_arrange
+
+# Indicate significant coefs
+est_confint_status <- est_confint_status %>%
+  mutate(significant = sign(lower_bound) == sign(upper_bound))
+
+```
+
+```{r message=FALSE, warning=FALSE, echo=FALSE, fig.height=4, fig.width=8, fig.align='center'}
+
+# The Fixed Effects plot
+errorbar_linetype <- ifelse(est_confint_status$significant, "solid", "dashed")
+points_fill <- ifelse(est_confint_status$significant, "gray50", "white")
+ggplot(data = est_confint_status,
+         aes(x = est_status, y = reorder(est_confint_status$model_names, est_status))) +
+     geom_errorbarh(aes(xmin = lower_bound,
+                       xmax = upper_bound,
+                       height = 0.3),
+                    size=0.5,
+                   color='gray50',
+                   linetype=errorbar_linetype
+                   ) +
+  
+    geom_point(fill=points_fill, pch=21, size=2,
+               position = position_dodge(width = 0.5)) + 
+  
+    theme_minimal() +
+    theme(axis.text.y = element_text(color = "black", size = 11),
+          axis.text.x = element_text(size = 12, face = "bold"))  +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "darkgrey", size = 0.4) +
+    labs(y = "", x = '')  +
+    xlim(-1, 1) + 
+    theme(plot.title = element_text(size=14, face="bold", hjust=0.5),
+          legend.position="bottom") +
+    ggtitle("Fixed Effects of Beginners' Status on the Skillsets Possession") +
+    xlab("← Beginners with Work Experience       |       Beginners with Masters →               ") 
+
+
+```
+
+## Which countries are better at providing starters with skillsets within postgraduate education vs. working environment?
+
+<p style='text-align: justify;'> 
+Second, we examine how the effects described above are spread across countries. The heatmap below indicates that on average wealthier countries are better at equipping beginners with skills within an academic environment (more greenish colours). In turn, less prosperous countries are better at providing skills in the labour market (more reddish colours). However, there are exceptions, such as India, where non-working masters are somewhat better at programming languages (unlike at other skillsets) than beginning workers with experience.
+</p>
+<p style='text-align: justify;'> 
+Overall, there are countries where postgraduate studies are more effective (e.g., US, Canada, Germany) than an early-career start and countries where labour marker is a better educator (e.g., Egypt, India, South Korea).
+</p>
+
+<p style='text-align: justify;'> 
+The following equations highlight with red the parameters discussed in the subsection and displayed in the subsequent graph:
+</p> 
+
+$$
+\scriptsize
+Logit(Skillset_{ij}) = b_{0j} + b_{1j}*status + b_{2j}*gender + b_{3j}*log(income) + b_{4j}*age + b_{5j}*year \\
+\scriptsize
+b_{0j} = \gamma_{00} + u_{00} \\
+\scriptsize
+b_{1j} = \gamma_{10} + \color{Red}{u_{10}} \\
+\scriptsize
+b_{ij} = \gamma_{i0}, \space for \space i \neq 0,1
+$$
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+extract.RandomIntercepts <- function(model_object, coeff,
+                                top_n_coeffs = 10000,
+                                onlySignficant = F,
+                                ggtitle = ''){
+  
+  df_coeffs <- as.data.frame(ranef(model_object, condVar=T))
+  
+  # Select only group coefficents
+  df_coeffs <- df_coeffs %>% filter(grpvar=="country")
+  
+  # Select coefficient to plot
+  df_coeffs <- df_coeffs %>% filter(term==coeff)
+  
+  # Indicate significant coefs
+  df_coeffs <- df_coeffs %>%
+    dplyr::mutate(condupper=condval + 1.64*condsd,
+                  condlower=condval - 1.64*condsd,
+                  significant=sign(condlower)==sign(condupper)) # %>%
+  
+  # Select only signficant coefficents
+  if(onlySignficant){
+    df_coeffs <- df_coeffs %>% filter(significant)
+  }
+  
+  # Select top N coeffiecents
+  df_coeffs <- df_coeffs %>% top_n(top_n_coeffs, wt = condval)
+  
+  # Preprocessing
+  df_coeffs$dep_var <- colnames(model_object@frame)[1]
+  df_coeffs <- df_coeffs %>% dplyr::select(grp, dep_var, condval, significant)
+  
+  return(df_coeffs)
+  
+}
+
+
+
+list_intercepts <- list()
+for (i in 1:length(random_slope_models)){
+  
+  list_intercepts[[i]] <- extract.RandomIntercepts(
+    random_slope_models[[i]], coeff = 'statusmaster_non_working')
+  
+}
+
+df_intercepts <- do.call(rbind.data.frame, list_intercepts)
+
+df_intercepts_est <- df_intercepts %>%
+  tidyr::pivot_wider(id_cols = grp,
+                     names_from = dep_var,
+                     values_from = condval)
+df_intercepts_signif <- df_intercepts %>%
+  tidyr::pivot_wider(id_cols = grp,
+                     names_from = dep_var,
+                     values_from = significant)
+
+library(pheatmap)
+
+df_intercepts_est <- df_intercepts_est[order(-rowSums(df_intercepts_est %>% dplyr::select(-c(grp)))),]
+
+t <- df_intercepts_est$grp
+df_intercepts_est <- df_intercepts_est %>% dplyr::select(-c(grp))
+rownames(df_intercepts_est) <- t
+
+
+
+```
+
+```{r message=FALSE, warning=FALSE, echo=FALSE, fig.height=6, fig.width=5, fig.align='center'}
+
+# The Random Effects countries plot
+vec_breaks <- seq(-0.7, 0.7, by = 0.01)
+pheatmap::pheatmap(df_intercepts_est,
+                   cluster_rows=F,
+                   cluster_cols=F,
+                   angle_col = "90",
+                   color = colorRampPalette(c(vec_colors[2], "white", vec_colors[1]))(length(vec_breaks)),
+                   breaks = vec_breaks,
+                   border_color="white",
+                   display_numbers=F,
+                   legend=T,
+                   main="Random Effects of Beginners' Status\n on Skillsets Possession by Countries",
+                   fontsize=8, fontsize_row=9, fontsize_col=10,
+                   labels_col = names_arrange
+                   )
+
+```                                  
+
+
+                                                   
+## How does the effect of postgraduate education vs. working environment differ between men and women?
+
+<p style='text-align: justify;'> 
+Third, we hone in on the variation of fixed effects (presented at the beginning of the modelling section) between men and women.
+</p>
+<p style='text-align: justify;'> 
+Essentially, confidence intervals for both genders for most of the skillsets follow the same pattern. Specifically, CIs for men and women are either both depicted with a solid line (statistically significant) or with a dashed line (statistically insignificant). This means men (or women) are not systematically better or worse within any of the two tracks for DS&ML starters than women (or men). **Both environments treat males and females relatively equally from the perspective of delivering to them skills at a beginning phase of their post-bachelor development.**
+</p>
+<p style='text-align: justify;'>     
+There is only one skillset demonstrating gender-wise differences – Natural Language Processing. Both working and postgraduate trajectories suit men nicely at the start of their career (the respective coefficient is statistically insignificant). Contrariwise, women are more successful at mastering NLP skillset as part of their studies at a university than in the labour market.
+</p>
+
+<p style='text-align: justify;'>
+The following equations highlight with red the parameters discussed in the subsection and displayed in the subsequent graph:
+</p>
+
+$$
+\scriptsize
+Logit(Skillset_{ij}) = b_{0j} + b_{1j}*status + b_{2j}*gender + b_{3j}*log(income) + \\
+\scriptsize
++ b_{4j}*age + b_{5j}*year + \color{Red}{b_{6i}*status*gender}\\
+\scriptsize
+b_{0j} = \gamma_{00} + u_{00} \\
+\scriptsize
+b_{1j} = \gamma_{10} + u_{10} \\
+\scriptsize
+b_{ij} = \gamma_{i0}, \space for \space i \neq 0,1
+$$
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+# The Interaction by Gender estimation
+gender_inter_models <- list()
+for(i in seq_along(vec_arrange)) {
+  my_formula = as.formula(paste(vec_arrange[i],
+    "~ year + scale(log(slry_numb + 1)) + age_bin + status*gndr + (1 + status | country)"
+  ))
+  gender_inter_models[[i]] = glmer(my_formula, data = df,
+                     family = binomial(link = 'logit'),
+                     control = glmerControl(optimizer = "bobyqa",
+                                            optCtrl = list(maxfun = 2e5)))
+  print(i)
+}
+names_arrange_gndr <- names_arrange
+
+# extracting parameters from interaction models
+gender_inter_params <- do.call(rbind.data.frame, lapply(1:length(gender_inter_models),
+                                 function(i)
+                                 cbind.data.frame(
+                                   'model_names' = names_arrange_gndr[i],
+                                   as_data_frame(pairs(emmeans(gender_inter_models[[i]], ~ gndr| status), by = 'gndr')) %>%
+  filter(contrast == 'early_non_student - master_non_working' & !gndr == 'other_gender') %>%
+  select(gndr, estimate, SE) %>%
+  mutate(upper = -(estimate + 1.64*SE),
+         lower = -(estimate - 1.64*SE),
+         estimate = -estimate)
+                                   )
+                                 )) %>%
+  mutate(significant = sign(lower) == sign(upper),
+         points_fill.gender = paste0(significant, gndr),
+         model_names = factor(model_names,
+       levels=est_confint_status[order(est_confint_status$est_status),]$model_names))
+
+```
+
+
+```{r fig.height=5, fig.width=8, fig.align='center', message=FALSE, warning=FALSE, echo=FALSE}
+
+# The Interaction by Gender plot
+errorbar_linetype.gender <- ifelse(gender_inter_params$significant, "solid", "dashed")
+points_fill.gender <- gender_inter_params$points_fill.gender %>% dplyr::recode(
+  "FALSEman"='white', "FALSEwoman"='white', 
+  "TRUEman"=vec_colors[2], "TRUEwoman"=vec_colors[1],
+)
+text_bold.gender <- c('plain', 'plain', 'plain', 'plain', 'plain', 'bold', 'plain', 'plain')
+
+
+ggplot(data = gender_inter_params, aes(y = model_names, x = estimate, color = gndr)) +
+  
+     geom_errorbarh(aes(xmin = lower, xmax = upper, height = 0.3),
+                    position = position_dodge(width = 0.5),
+                    linetype=errorbar_linetype.gender, size=0.5) +
+
+    geom_point(aes(colour=gndr), fill=points_fill.gender, pch=21, size=2,
+               position = position_dodge(width = 0.5)) + 
+    scale_color_manual(values = c("man" = vec_colors[2], "woman" = vec_colors[1]),
+                       labels = c("Man", "Woman"),
+                       name = "") +
+    guides(color = guide_legend(reverse=TRUE)) +
+    
+    theme_minimal() +
+    theme(axis.text.y = element_text(color = "black", size = 11),
+          axis.text.x = element_text(size = 12, face = "bold"))  +
+  
+    geom_vline(xintercept = 0, linetype = "dashed", color = "darkgrey", size = 0.4) +
+    xlim(-1.35, 1.35) + 
+    labs(y = "", x = '')  +
+  
+    theme(plot.title = element_text(size = 13, 
+                                    face = "bold", hjust=0.5),
+            legend.position=c(.8,.15),
+          legend.text=element_text(size=11),
+          axis.text.y = element_text(
+            face = text_bold.gender)) +
+    
+    ggtitle("Effects of Beginners' Status on Skillsets Possession by Gender") +
+    xlab("← Beginners with Work Experience       |       Beginners with Masters →               ") 
+
+
+```
+
+                                                   
+## How does the effect of postgraduate education vs. working environment differ between age groups?
+
+<p style='text-align: justify;'> 
+Forth, we concentrate on how age groups (older or younger than 25 years - our sample median) can modify our effects of interest.
+</p>
+<p style='text-align: justify;'>                                                    
+The plot below displays the following inference: mature beginners tend to exploit the academic surrounding more effectively than the labour market one in mastering such skillsets as NLP and computer vision. The same pattern can be detected for ML frameworks and algorithms, but the respective parameters do not reach statistical significance. In contrast, younger beginners are better at programming languages if they select master studies in favour of the out-of-university practice.
+</p>
+<p style='text-align: justify;'> 
+Generally, the uncovered dissimilarities by age groups mean that older people can achieve more within academia than in the labour market in most of the DS&ML areas that are considered relatively niche and comprehensive. However, when it comes to more routine activities such as programming, the younger generation shows better skill-based attainments after receiving a postgraduate degree than after getting experience at work.
+</p>
+
+<p style='text-align: justify;'> 
+The following equations highlight with red the parameters discussed in the subsection and displayed in the subsequent graph:
+</p>
+
+$$
+\scriptsize
+Logit(Skillset_{ij}) = b_{0j} + b_{1j}*status + b_{2j}*gender + b_{3j}*log(income) + \\
+\scriptsize 
++ b_{4j}*age + b_{5j}*year + \color{Red}{b_{6i}*status*year}\\
+\scriptsize
+b_{0j} = \gamma_{00} + u_{00} \\
+\scriptsize
+b_{1j} = \gamma_{10} + u_{10} \\
+\scriptsize
+b_{ij} = \gamma_{i0}, \space for \space i \neq 0,1
+$$
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+# The Interaction by Age estimation
+age_inter_models <- list()
+for(i in seq_along(vec_arrange)) {
+  my_formula = as.formula(paste(vec_arrange[i],
+    "~ year + log(slry_numb + 1) + gndr  + status*age_bin + (1 + status | country)"
+  ))
+  age_inter_models[[i]] = glmer(my_formula, data = df,
+                     family = binomial(link = 'logit'),
+                     control = glmerControl(optimizer = "bobyqa",
+                                            optCtrl = list(maxfun = 2e5)))
+  print(i)
+}
+names_arrange_age <- names_arrange
+
+
+age_inter_params <- do.call(rbind.data.frame, lapply(1:length(age_inter_models),
+                                 function(i)
+                                 cbind.data.frame(
+                                   'model_names' = names_arrange_age[i],
+                                   as_data_frame(pairs(emmeans(age_inter_models[[i]], ~ age_bin | status), by = 'age_bin')) %>%
+  filter(contrast == 'early_non_student - master_non_working') %>%
+  select(age_bin, estimate, SE) %>%
+  mutate(upper = -(estimate + 1.64*SE),
+         lower = -(estimate - 1.64*SE),
+         estimate = -estimate)
+                                   )
+                                 )) %>%
+  mutate(significant = sign(lower) == sign(upper),
+         points_fill.age = paste0(significant, age_bin),
+         model_names = factor(model_names,
+       levels=est_confint_status[order(est_confint_status$est_status),]$model_names))
+
+```
+
+
+```{r fig.height=5, fig.width=8, fig.align='center', message=FALSE, warning=FALSE, echo=FALSE}
+
+# The Interaction by Age plot
+errorbar_linetype.age <- ifelse(age_inter_params$significant, "solid", "dashed")
+points_fill.age <- age_inter_params$points_fill.age %>% dplyr::recode(
+  "FALSEyoung"='white', "FALSEold"='white', 
+  "TRUEyoung"=vec_colors[1], "TRUEold"=vec_colors[2],
+)
+text_bold.age <- c('plain', 'plain', 'bold', 'bold', 'plain', 'bold', 'plain', 'plain')
+
+ggplot(data = age_inter_params, aes(y = model_names, x = estimate, color = age_bin)) +
+  
+     geom_errorbarh(aes(xmin = lower, xmax = upper, height = 0.3),
+                    position = position_dodge(width = 0.5),
+                    linetype=errorbar_linetype.age, size=0.5) +
+
+    geom_point(aes(colour=age_bin), fill=points_fill.age, pch=21, size=2,
+               position = position_dodge(width = 0.5)) + 
+    scale_color_manual(values = c("young" = vec_colors[1], "old" = vec_colors[2]),
+                       labels = c("18-24 years old", "25+ years old"),
+                       name = "") +
+
+    theme_minimal() +
+    theme(axis.text.y = element_text(color = "black", size = 11),
+          axis.text.x = element_text(size = 12, face = "bold"))  +
+  
+    geom_vline(xintercept = 0, linetype = "dashed", color = "darkgrey", size = 0.4) +
+    xlim(-1.35, 1.35) + 
+    labs(y = "", x = '')  +
+  
+    theme(plot.title = element_text(size = 14, 
+                                    face = "bold", hjust=0.5),
+          legend.position=c(.8,.15),
+          legend.text=element_text(size=11),
+          axis.text.y = element_text(face = text_bold.age)) +
+  
+    ggtitle("Effects of Beginners' Status on Skillsets Possession by Age") +
+    xlab("← Beginners with Work Experience       |       Beginners with Masters →               ") 
+
+
+```
+
+## How has the effect of postgraduate education vs. working environment changed over the past years?
+
+<p style='text-align: justify;'> 
+Finally, we explore how our fixed effects change over time. The graph below visualises the effects of being either a beginning non-working master or a beginning worker with a bachelor diploma on skillsets possession by years. The names of skillsets in bold depict where the major shifts have happened.
+</p>
+<p style='text-align: justify;'> 
+In 2019 and 2021, working professionals with bachelors were systematically worse than unemployed masters in ML algorithms and NLP; however, in 2020, the former happened to be on par with the latter (in 2020, CIs cross the zero line, pointing on the absence of differences between our groups of interest). **This may reflect at least two processes: either education during the COVID-19 pandemic dropped in quality, or people in the labour market became more qualified due to experiencing new employment opportunities that emerged during those times (e.g., positions requiring only remote work).**
+</p>
+<p style='text-align: justify;'> 
+A similar trend is observed for the computer vision skillset; however, in 2021, the situation did not seem to recover: both 2020 and 2021 are lagging behind 2019 in how unemployed masters outstripped beginning workers in the spectrum of computer vision areas of expertise.
+</p>
+<p style='text-align: justify;'> 
+On the contrary, programming languages over years have become a more 'academic' competence category: in 2019, it used to be a skillset equally trained by both working and learning environments, whereas in 2020 and 2021, master's education took a lead in terms of providing proper training for this skillset.
+</p>
+
+<p style='text-align: justify;'> 
+The following equations highlight with red the parameters discussed in the subsection and displayed in the subsequent graph:
+</p>
+
+$$
+\scriptsize
+Logit(Skillset_{ij}) = b_{0j} + b_{1j}*status + b_{2j}*gender + b_{3j}*log(income) + \\
+\scriptsize
++ b_{4j}*age + b_{5j}*year + \color{Red}{b_{6i}*status*age}\\
+\scriptsize
+b_{0j} = \gamma_{00} + u_{00} \\
+\scriptsize
+b_{1j} = \gamma_{10} + u_{10} \\
+\scriptsize
+b_{ij} = \gamma_{i0}, \space for \space i \neq 0,1
+$$
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+# The Interaction by Time estimation
+time_inter_models <- list()
+for(i in seq_along(vec_arrange)) {
+  my_formula = as.formula(paste(vec_arrange[i],
+    "~ gndr + scale(log(slry_numb + 1)) + age_bin + status*year + (1 + status | country)"
+  ))
+  time_inter_models[[i]] = glmer(my_formula, data = df,
+                     family = binomial(link = 'logit'),
+                     control = glmerControl(optimizer = "bobyqa",
+                                            optCtrl = list(maxfun = 2e5)))
+  print(i)
+}
+names_arrange_time <- names_arrange
+
+# extracting parameters from interaction models
+time_inter_params <- do.call(rbind.data.frame, lapply(1:length(time_inter_models),
+                                 function(i)
+                                 cbind.data.frame(
+                                   'model_names' = names_arrange_time[i],
+as_data_frame(pairs(emmeans(time_inter_models[[i]], ~ year| status), by = 'year')) %>%
+  filter(contrast == 'early_non_student - master_non_working') %>%
+  select(year, estimate, SE) %>%
+  mutate(upper = -(estimate + 1.64*SE),
+         lower = -(estimate - 1.64*SE),
+         estimate = -estimate)))) %>%
+  mutate(significant = sign(lower) == sign(upper),
+         points_fill.time = paste0(significant, year),
+         model_names = factor(model_names,
+       levels=est_confint_status[order(est_confint_status$est_status),]$model_names))
+
+
+```
+
+```{r echo=FALSE, fig.height=5, fig.width=8, fig.align='center', message=FALSE, warning=FALSE}
+
+# The Interaction by Time plot
+errorbar_linetype.time <- ifelse(time_inter_params$significant, "solid", "dashed")
+points_fill.time <- time_inter_params$points_fill.time %>% dplyr::recode(
+  "FALSE2019"='white', "FALSE2020"='white', "FALSE2021"='white',
+  "TRUE2019"=vec_colors[1], "TRUE2020"=vec_colors[2], "TRUE2021"=vec_colors[3]
+)
+text_bold.time <- c('plain', 'plain', 'bold', 'bold', 'plain', 'bold', 'bold', 'plain')
+
+ggplot(data = time_inter_params, aes(y = model_names, x = estimate, color = year)) +
+  
+     geom_errorbarh(aes(xmin = lower, xmax = upper, height = 0.3), size=0.5,
+                    position = position_dodge(width = 0.5),
+                    linetype=errorbar_linetype.time) +
+    
+    geom_point(aes(colour=year), fill=points_fill.time, pch=21, size=2,
+               position = position_dodge(width = 0.5)) + 
+    scale_color_manual(values = c("2019" = vec_colors[1], "2020" = vec_colors[2], "2021" = vec_colors[3]),
+                       name = "") +
+    guides(color = guide_legend(reverse=TRUE)) +
+    theme_minimal() +
+    theme(axis.text.y = element_text(color = "black", size = 11),
+          axis.text.x = element_text(size = 12, face = "bold"))  +
+  
+    geom_vline(xintercept = 0, linetype = "dashed", color = "darkgrey", size = 0.4) +
+    xlim(-1.35, 1.35) + 
+    labs(y = "", x = '')  +
+  
+    theme(plot.title = element_text(size = 14, 
+                                    face = "bold", hjust=0.5),
+          legend.position=c(.8,.15),
+          legend.text=element_text(size=11),
+          axis.text.y = element_text(
+            face = text_bold.time)) +
+    
+  
+    ggtitle("Effects of Beginners' Status on Skillsets Possession by Year") +
+    xlab("← Beginners with Work Experience       |       Beginners with Masters →               ") 
+
+
+```                                    
+
+# Conclusion
+
+<p style='text-align: justify;'> 
+To sum up, this notebook attempted to accentuate the complex nature of the professional roads branching off in post-bachelor DS&ML area. The outlined analysis was aimed at providing Kagglers with valuable insights which can help people in their decision-making after getting a university diploma. For this purpose, we applied trustworthy statistical tricks to squeeze all the juice from the data patterns and capture significant dependencies within it. Generally, the conducted research revealed the following:
+</p>
+
+<p style='text-align: justify;'> 
+1. Despite the limited popularity of a postgraduate pathway among early-career Kagglers (especially for males), master students on average are more competent than beginning employees in the majority of skillsets – ML frameworks, ML algorithms, NLP, IDE, programming languages. However, working beginners outstrip master students at specialised hardware usage.
+</p>
+
+<p style='text-align: justify;'> 
+2. Women compared to men continue education more frequently and demonstrate a more diverse NLP skillset within the academic environment. Except for NLP, female beginners are the same as male beginners concerning skillset possession within both academia and the labour market.
+</p>
+
+<p style='text-align: justify;'> 
+3. Younger Kaggle survey participants (<24 years) are more likely to go for a postgraduate track than mature participants (>25 years). However, the latter achieve better preparation within academia rather than though job practice in key niche areas – NLP and computer vision (where younger persons are equally prepared within both education and working settings). In turn, younger master students surpass younger workers in coding, whereas older masters and older employees are not different in that respect.
+</p>
+
+<p style='text-align: justify;'> 
+4. Attaining a masters degree rather than finding a job is more widespread in wealthier countries compared to poorer regions. Most likely this happens because richer countries offer training of higher quality, which is not even compensated by working experiences at the start of one’s career in richer countries. Nevertheless, in some less developed countries, universities still provide better preparation in certain skillsets than those countries’ working environments.
+</p>
+
+<p style='text-align: justify;'> 
+5. During the COVID-19 pandemic, there was a faint spike in the popularity of masters education compared to the choice of starting a working career, perhaps, due to remote learning opportunities and crisis phenomena in the labour market. However, postgraduates were lagging behind their working counterparts in ML algorithms, NLP, and computer vision, which could be attributed to the decreased quality of education during the pandemic. On the contrary, unemployed master’s students improved their positions in programming languages during 2020 compared to employees entering the DS&ML field.
+</p>
+
+<p style='text-align: justify;'> 
+We might see that the answer to the question _“Which trajectory is more appealing for beginners?”_ is heavily dependent on a range of contextual and individual attributes. For example, if you are a woman feeling passionate about NLP, going for masters will enhance your chances of becoming proficient in the field. If you are from a less developed country, preferring employment to education may give you a competitive edge with regard to major DS&ML skillsets. If you are older than 25 years and eager to specialise in computer vision, a postgraduate trajectory can be more lucrative in the scope of acquired competencies than a decision to start climbing a corporate ladder (if you are younger, both choices may be acceptable). **Overall, there is no such thing as a “one size fit all” path to advance DS&ML skills, rather there are multiple strategies that beginners can follow to achieve proficiency and success in their careers.**
+</p>
+
+<p style='text-align: justify;'> 
+Our study has a limitation worth mentioning. It refers to the measurement of skillsets as numbers of skills (with a subsequent below- and above-average binarization), which does not capture the quality level of skills proficiency. Future analysis on Kaggle will benefit from questions in the survey measuring how good people are at possessing their skills. This can be achieved by, for instance, introducing a Likert-type methodology.
+</p>
+
+Thank you for taking the time to read our piece of analytics. Hope you enjoyed it!
+
